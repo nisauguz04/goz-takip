@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Göz Yorgunluğu Takibi</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;padding:16px;line-height:1.5}
+  button{font-size:1rem;padding:12px 18px;margin:6px 0;width:100%;border-radius:8px;border:1px solid #888}
+  #goster{font-size:1.1rem;padding:10px;background:#8883;border-radius:8px}
+  video{width:100%;border-radius:8px;transform:scaleX(-1)}
+  input[type=range]{width:100%}
+  .gizli{display:none}
+</style>
+</head>
+<body>
+<h2>Göz Yorgunluğu Çalışması</h2>
+<p>Kamera görüntüsü kaydedilmez ve gönderilmez. Sadece göz kırpma sayısı ve sayısal değerler toplanır.</p>
+<label><input type="checkbox" id="izin"> Verilerimin araştırmada kullanılmasını kabul ediyorum.</label><br>
+<input id="kid" placeholder="Katılımcı kodu (ör. K01)" style="width:100%;padding:10px;margin:8px 0">
+<button id="basla">Başlat</button>
+<video id="v" autoplay playsinline muted class="gizli"></video>
+<div id="goster" class="gizli"></div>
+<button id="bitir" class="gizli">Bitir</button>
+
+<div id="anket" class="gizli">
+  <p>Şu an gözlerin ne kadar yorgun? (0 = hiç, 100 = çok yorgun): <b id="deger">50</b></p>
+  <input type="range" id="puan" min="0" max="100" value="50">
+  <button id="gonder">Gönder</button>
+  <button id="indir">CSV indir (yedek)</button>
+</div>
+
+<script type="module">
+import {FaceLandmarker, FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+// Google Apps Script web uygulaması adresini buraya yapıştır:
+const GONDERIM_URL = "";
+
+const ESIK = 0.21, MIN_KARE = 2;
+const SOL = [362,385,387,263,373,380], SAG = [33,160,158,133,153,144];
+const $ = id => document.getElementById(id);
+let lm, calisiyor = false, kayitlar = [];
+
+const d = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+const ear = (p,i) => (d(p[i[1]],p[i[5]]) + d(p[i[2]],p[i[4]])) / (2*d(p[i[0]],p[i[3]]));
+
+$("puan").oninput = e => $("deger").textContent = e.target.value;
+
+$("basla").onclick = async () => {
+  if(!$("izin").checked || !$("kid").value.trim()){ alert("Kabul kutusunu işaretle ve kod gir."); return; }
+  $("basla").textContent = "Yükleniyor...";
+  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  lm = await FaceLandmarker.createFromOptions(fileset, {
+    baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"},
+    runningMode:"VIDEO", numFaces:1
+  });
+  const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"user"}});
+  $("v").srcObject = stream;
+  ["basla","izin","kid"].forEach(i => $(i).classList.add("gizli"));
+  document.querySelector("label").classList.add("gizli");
+  ["v","goster","bitir"].forEach(i => $(i).classList.remove("gizli"));
+  calisiyor = true; dongu();
+};
+
+let kapali = 0, kirpma = 0, earlar = [], bas = Date.now(), dkBas = bas;
+
+function dongu(){
+  if(!calisiyor) return;
+  const v = $("v");
+  if(v.readyState >= 2){
+    const s = lm.detectForVideo(v, performance.now());
+    if(s.faceLandmarks.length){
+      const p = s.faceLandmarks[0];
+      const e = (ear(p,SOL) + ear(p,SAG)) / 2;
+      earlar.push(e);
+      if(e < ESIK) kapali++;
+      else { if(kapali >= MIN_KARE) kirpma++; kapali = 0; }
+    }
+    const simdi = Date.now();
+    if(simdi - dkBas >= 60000){
+      kayitlar.push({
+        katilimci: $("kid").value.trim(),
+        zaman: new Date().toLocaleTimeString("tr-TR"),
+        ekran_suresi_dk: +((simdi-bas)/60000).toFixed(1),
+        kirpma_dk: kirpma,
+        ort_ear: +(earlar.reduce((a,b)=>a+b,0)/Math.max(earlar.length,1)).toFixed(3)
+      });
+      kirpma = 0; earlar = []; dkBas = simdi;
+    }
+    $("goster").textContent = `Süre: ${((simdi-bas)/60000).toFixed(1)} dk | Bu dakikada kırpma: ${kirpma} | Kayıt: ${kayitlar.length}`;
+  }
+  requestAnimationFrame(dongu);
+}
+
+$("bitir").onclick = () => {
+  calisiyor = false;
+  v.srcObject.getTracks().forEach(t => t.stop());
+  ["v","goster","bitir"].forEach(i => $(i).classList.add("gizli"));
+  $("anket").classList.remove("gizli");
+};
+
+$("gonder").onclick = async () => {
+  const etiket = +$("puan").value;
+  kayitlar.forEach(k => k.yorgunluk_etiketi = etiket);
+  if(!GONDERIM_URL){ alert("Gönderim adresi tanımlı değil. CSV indir."); return; }
+  try{
+    await fetch(GONDERIM_URL, {method:"POST", mode:"no-cors", body:JSON.stringify(kayitlar)});
+    alert("Gönderildi, teşekkürler!");
+  }catch(e){ alert("Gönderilemedi, CSV indir."); }
+};
+
+$("indir").onclick = () => {
+  const etiket = +$("puan").value;
+  const satirlar = ["katilimci,zaman,ekran_suresi_dk,kirpma_dk,ort_ear,yorgunluk_etiketi",
+    ...kayitlar.map(k => [k.katilimci,k.zaman,k.ekran_suresi_dk,k.kirpma_dk,k.ort_ear,etiket].join(","))];
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([satirlar.join("\n")], {type:"text/csv"}));
+  a.download = "goz_verisi.csv"; a.click();
+};
+</script>
+</body>
+</html>
